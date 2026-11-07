@@ -64,6 +64,24 @@ export const apiSetChapterOrder = (workId: string, ids: string[]) =>
 export const apiRetranslateChapter = (workId: string, chapter: string) =>
   api.post<{ job_id: string }>(`/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(chapter)}/retranslate`).then(r => r.data.job_id)
 
+export type ScrapeResult = {
+  empty: boolean
+  title: string
+  body: string
+  next_url: string | null
+}
+
+export const apiScrape = (source: string, url: string) =>
+  api.post<ScrapeResult>('/scrape', { source, url }).then(r => r.data)
+
+export function apiErrorMessage(e: unknown): string {
+  if (typeof e === 'object' && e && 'response' in e) {
+    const detail = (e as { response?: { data?: { detail?: unknown } } }).response?.data?.detail
+    if (typeof detail === 'string' && detail.trim()) return detail
+  }
+  return e instanceof Error ? e.message : String(e)
+}
+
 /** Viewer URL slug: filename without a trailing .json (Vite 404s on reload if the path looks like a file). */
 export function chapterSlug(filename: string): string {
   return filename.replace(/\.json$/i, '')

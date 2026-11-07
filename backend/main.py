@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routers import works, chapters, terms, translate
+from .routers import works, chapters, terms, translate, scrape
 
 # Load .env from the project root (two levels up from this file).
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -25,6 +25,7 @@ app.include_router(works.router)
 app.include_router(chapters.router)
 app.include_router(terms.router)
 app.include_router(translate.router)
+app.include_router(scrape.router)
 
 
 @app.get("/api/health")

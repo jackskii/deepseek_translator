@@ -20,11 +20,22 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import { HomePage } from './pages/HomePage'
 import { TranslatorPage } from './pages/TranslatorPage'
+import { AutoTranslatePage } from './pages/AutoTranslatePage'
 import { ViewerPage } from './pages/ViewerPage'
 import { TermsPage } from './pages/TermsPage'
 import { TranslatingPage } from './pages/TranslatingPage'
 import { useAppStore } from './stores/appStore'
-import { apiGetWorks, apiGetChapters, apiGetJobStatus, apiSetChapterOrder, chapterViewPath, type ChapterEntry } from './services/api'
+import {
+  apiGetWorks,
+  apiGetChapters,
+  apiGetJobStatus,
+  apiSetChapterOrder,
+  apiStartTranslation,
+  apiScrape,
+  apiErrorMessage,
+  chapterViewPath,
+  type ChapterEntry,
+} from './services/api'
 
 export default function App() {
   const navigate = useNavigate()
@@ -33,6 +44,7 @@ export default function App() {
   const setSelectedWork = useAppStore((s) => s.setSelectedWork)
   const activeJobs = useAppStore((s) => s.activeJobs)
   const removeActiveJob = useAppStore((s) => s.removeActiveJob)
+  const autoRun = useAppStore((s) => s.autoRun)
   const [collapsed, setCollapsed] = useState(false)
 
   // Keep selectedWork in sync with the URL's :work param.
@@ -76,6 +88,74 @@ export default function App() {
     return () => { cancelled = true }
   }, [activeJobs, qc, removeActiveJob])
 
+  // Auto-scrape loop. Lives here (not on the Auto page) so navigating away
+  // does not abort a long run. Stop flips autoRun.status; this effect then exits.
+  useEffect(() => {
+    if (autoRun?.status !== 'running') return
+    let cancelled = false
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+    const stillRunning = () => {
+      const run = useAppStore.getState().autoRun
+      return !cancelled && run?.status === 'running'
+    }
+
+    ;(async () => {
+      while (stillRunning()) {
+        const run = useAppStore.getState().autoRun
+        if (!run || run.status !== 'running') break
+        const url = run.nextUrl
+        useAppStore.getState().patchAutoRun({ currentUrl: url })
+        try {
+          const scraped = await apiScrape(run.source, url)
+          if (!stillRunning()) break
+          if (scraped.empty) {
+            useAppStore.getState().patchAutoRun({
+              status: 'done',
+              message: '已结束（空页）',
+            })
+            break
+          }
+          const text = `${scraped.title}\n\n${scraped.body}`.trim()
+          const jobId = await apiStartTranslation(run.work, text)
+          if (!stillRunning()) break
+          const now = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+          useAppStore.getState().addActiveJob(jobId, run.work, now, text)
+          qc.invalidateQueries({ queryKey: ['chapters', run.work] })
+          const started = (useAppStore.getState().autoRun?.started ?? 0) + 1
+          const limit = useAppStore.getState().autoRun?.limit ?? null
+          const hitLimit = limit != null && started >= limit
+          useAppStore.getState().patchAutoRun({
+            started,
+            lastUrl: url,
+            nextUrl: scraped.next_url ?? '',
+            ...(hitLimit
+              ? { status: 'done' as const, message: `已结束（${started} 章）` }
+              : {}),
+          })
+          if (hitLimit || !scraped.next_url) {
+            if (!hitLimit) {
+              useAppStore.getState().patchAutoRun({
+                status: 'done',
+                message: '已结束（空页）',
+              })
+            }
+            break
+          }
+          await sleep(2000)
+        } catch (e) {
+          if (!stillRunning()) break
+          useAppStore.getState().patchAutoRun({
+            status: 'error',
+            message: apiErrorMessage(e),
+          })
+          break
+        }
+      }
+    })()
+
+    return () => { cancelled = true }
+  }, [autoRun?.status, qc])
+
   const onHome = location.pathname === '/'
 
   return (
@@ -110,6 +190,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/work/:work/translate" element={<TranslatorPage />} />
+          <Route path="/work/:work/auto" element={<AutoTranslatePage />} />
           <Route path="/work/:work/translating/:jobId" element={<TranslatingPage />} />
           <Route path="/work/:work/chapters/:chapter" element={<ViewerPage />} />
           <Route path="/work/:work/terms" element={<TermsPage />} />
@@ -164,6 +245,7 @@ function WorkSidebar({ collapsed }: { collapsed: boolean }) {
   const workName = works?.find((w) => w.id === work)?.name ?? work
 
   const translatePath = `/work/${encodeURIComponent(work)}/translate`
+  const autoPath = `/work/${encodeURIComponent(work)}/auto`
   const termsPath = `/work/${encodeURIComponent(work)}/terms`
 
   // An item is "active" only when the current pathname exactly matches its
@@ -192,6 +274,13 @@ function WorkSidebar({ collapsed }: { collapsed: boolean }) {
           📝
         </button>
         <button
+          className={`text-xl p-1.5 rounded hover:bg-slate-700 ${isActive(autoPath) ? 'bg-slate-700' : ''}`}
+          title="Auto Translate"
+          onClick={() => navigate(autoPath)}
+        >
+          ⚡
+        </button>
+        <button
           className={`text-xl p-1.5 rounded hover:bg-slate-700 ${isActive(termsPath) ? 'bg-slate-700' : ''}`}
           title="Manage Terms"
           onClick={() => navigate(termsPath)}
@@ -216,6 +305,12 @@ function WorkSidebar({ collapsed }: { collapsed: boolean }) {
         onClick={() => navigate(translatePath)}
       >
         📝 Create New Task
+      </button>
+      <button
+        className={`text-left px-3 py-2 rounded-md hover:bg-slate-700 ${isActive(autoPath) ? activeClass : idleClass}`}
+        onClick={() => navigate(autoPath)}
+      >
+        ⚡ Auto Translate
       </button>
       <button
         className={`text-left px-3 py-2 rounded-md hover:bg-slate-700 ${isActive(termsPath) ? activeClass : idleClass}`}

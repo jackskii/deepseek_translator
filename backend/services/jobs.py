@@ -15,6 +15,9 @@ from typing import Optional
 
 from . import llm, storage
 
+# First failure immediately retries the same job. Second failure sticks.
+MAX_TRIES = 2
+
 
 @dataclass
 class Job:
@@ -121,23 +124,34 @@ async def _run(job: Job) -> None:
 
     On success: write the translation into the job's file, rename a new
     task's file to the translation title, and mark the order entry done.
-    On exception: leave the old translation (retranslate) or the empty
-    reserved file (new task) in place; get_chapter_list reports it as failed.
+    On exception: retry immediately (same job, same file), up to MAX_TRIES
+    total attempts. After that, leave the old translation (retranslate) or
+    the empty reserved file (new task) in place; get_chapter_list reports
+    it as failed.
     """
-    try:
-        translation, names = await llm.translate(job.work_id, job.input_text)
-    except asyncio.CancelledError:
-        # cancel() already fixed up disk; just mark the in-memory job.
-        job.status = "cancelled"
-        raise
-    except Exception as e:
-        job.status = "error"
-        job.error = str(e)
+    last_error: Optional[str] = None
+    for attempt in range(1, MAX_TRIES + 1):
+        try:
+            translation, names = await llm.translate(job.work_id, job.input_text)
+        except asyncio.CancelledError:
+            job.status = "cancelled"
+            raise
+        except Exception as e:
+            last_error = str(e)
+            job.error = last_error
+            if attempt >= MAX_TRIES:
+                job.status = "error"
+                return
+            continue
+
+        job.added_names = len(names)
+        job.error = None
+        _finish(job, translation)
+        job.status = "done"
         return
 
-    job.added_names = len(names)
-    _finish(job, translation)
-    job.status = "done"
+    job.status = "error"
+    job.error = last_error
 
 
 def _finish(job: Job, translation: str) -> None:
