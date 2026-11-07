@@ -4,11 +4,14 @@
 
 ```bash
 ./install.sh   # 创建 .venv，安装后端依赖，npm install 前端依赖
-./start.sh     # 后台启动后端 (uvicorn :8000) + 前端 (vite :5173)
+./start.sh     # 后台启动后端 (:8000) + 翻译前端 (:5173) + 阅读器 (:5174)
 ./stop.sh      # 停止
 ```
 
-启动后打开 http://localhost:5173
+启动后打开：
+
+- 翻译端：http://localhost:5173
+- 手机阅读器：http://read.local:5174
 
 ## 配置
 
@@ -32,5 +35,5 @@ OPENROUTER_MODEL="deepseek/deepseek-r1"
 ## 架构
 
 - `backend/` — FastAPI 应用，直接读写 `works/` 目录下的 JSON 文件（无数据库）。
-- `frontend/` — React + Vite + TypeScript + Tailwind 单页应用。
+- `frontend/` — React + Vite + TypeScript + Tailwind。翻译端 (`index.html`) 与手机阅读器 (`reader.html`, 端口 5174)。
 - `works/` — 作品/章节/名词的 JSON 文件存储目录。

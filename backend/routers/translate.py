@@ -1,8 +1,7 @@
-import asyncio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ..services import jobs, storage
+from ..services import jobs
 
 router = APIRouter(prefix="/api/works/{work_id}/translate", tags=["translate"])
 
@@ -19,32 +18,17 @@ async def translate(work_id: str, body: TranslateRequest):
     disconnects. Poll GET /jobs/{job_id} for status."""
     if not body.input_text.strip():
         raise HTTPException(status_code=400, detail="input_text cannot be empty.")
-
-    job = jobs.create_job(work_id, body.input_text)
-    # Create the pending order-list entry immediately so the sidebar shows the
-    # task at the top (newest first) while it translates.
     try:
-        storage.add_order_entry(work_id, job.id)
-    except Exception:
-        pass
-    job.task = asyncio.create_task(jobs.run_job(job))
+        job = jobs.start(work_id, body.input_text)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     return {"job_id": job.id}
 
 
 @router.post("/jobs/{job_id}/cancel")
 def cancel_job_endpoint(work_id: str, job_id: str):
-    job = jobs.get_job(job_id)
-    if not job or job.work_id != work_id:
+    if not jobs.cancel(work_id, job_id):
         raise HTTPException(status_code=404, detail="Job not found.")
-    jobs.cancel_job(job_id)
-    try:
-        if job.target_filename:
-            # Retranslate cancel: the chapter file still exists; restore done.
-            storage.set_status_by_filename(work_id, job.target_filename, "done")
-        else:
-            storage.cancel_order_entry(work_id, job_id)
-    except Exception:
-        pass
     return {"ok": True}
 
 

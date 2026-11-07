@@ -24,7 +24,7 @@ import { ViewerPage } from './pages/ViewerPage'
 import { TermsPage } from './pages/TermsPage'
 import { TranslatingPage } from './pages/TranslatingPage'
 import { useAppStore } from './stores/appStore'
-import { apiGetWorks, apiGetChapters, apiGetJobStatus, apiSetChapterOrder, type ChapterEntry } from './services/api'
+import { apiGetWorks, apiGetChapters, apiGetJobStatus, apiSetChapterOrder, chapterViewPath, type ChapterEntry } from './services/api'
 
 export default function App() {
   const navigate = useNavigate()
@@ -79,7 +79,7 @@ export default function App() {
   const onHome = location.pathname === '/'
 
   return (
-    <div className="min-h-screen flex bg-slate-900 text-slate-200">
+    <div className="h-full overflow-hidden flex bg-slate-900 text-slate-200">
       {/* Sidebar */}
       <aside
         className={`${collapsed ? 'w-14' : 'w-64'} shrink-0 border-r border-slate-700 bg-slate-800 flex flex-col transition-all duration-200 overflow-hidden`}
@@ -94,7 +94,7 @@ export default function App() {
             {collapsed ? '▶' : '◀'}
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-2">
+        <div className="flex-1 min-h-0 overflow-hidden p-2 flex flex-col">
           {onHome ? (
             <IntroGuide collapsed={collapsed} />
           ) : (
@@ -106,7 +106,7 @@ export default function App() {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 p-6 overflow-auto">
+      <main className="flex-1 min-h-0 p-6 overflow-auto">
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/work/:work/translate" element={<TranslatorPage />} />
@@ -123,7 +123,10 @@ function IntroGuide({ collapsed }: { collapsed: boolean }) {
   if (collapsed) return null
   return (
     <div className="px-2 py-2 text-sm text-slate-300 flex flex-col gap-3">
-      <div className="font-semibold text-base">📖 DeepSeek Translator</div>
+      <div className="font-semibold text-base flex items-center gap-2">
+        <img src="/favicon.svg" alt="" className="w-5 h-5" />
+        DeepSeek Translator
+      </div>
       <div className="text-xs text-slate-400">一个简单的日语小说翻译工具</div>
       <hr className="border-slate-700" />
       <div className="font-medium">快速上手</div>
@@ -200,7 +203,7 @@ function WorkSidebar({ collapsed }: { collapsed: boolean }) {
   }
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-2 h-full min-h-0">
       <button
         className="text-left px-3 py-2 rounded-md hover:bg-slate-700 font-medium text-slate-200"
         onClick={() => navigate('/')}
@@ -244,7 +247,10 @@ function SortableChapterRow({
   active: boolean
   onNavigate: (path: string) => void
 }) {
-  const disabled = entry.status !== 'done'
+  const isRetranslating = entry.status === 'retranslating'
+  const isPending = entry.status === 'pending'
+  const isFailed = entry.status === 'failed'
+  const disabled = isPending || isRetranslating
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: entry.id,
     disabled,
@@ -254,28 +260,39 @@ function SortableChapterRow({
     transition,
     zIndex: isDragging ? 50 : undefined,
   }
-  const isRetranslating = entry.status === 'retranslating'
-  const isPending = entry.status === 'pending'
   const label = isPending
     ? `${formatEntryId(entry.id)} (translating...)`
-    : `📄 ${entry.filename!.replace('.json', '')}${isRetranslating ? ' (translating...)' : ''}`
+    : isFailed && !entry.filename
+      ? `${formatEntryId(entry.id)} (failed)`
+      : `${entry.filename!.replace('.json', '')}${isRetranslating ? ' (translating...)' : ''}`
   const path = isPending
     ? `/work/${encodeURIComponent(work)}/translating/${encodeURIComponent(entry.id)}`
-    : `/work/${encodeURIComponent(work)}/chapters/${encodeURIComponent(entry.filename!)}`
+    : entry.filename
+      ? chapterViewPath(work, entry.filename)
+      : ''
+  const rowColor = isFailed
+    ? active
+      ? 'bg-red-900 text-red-100'
+      : 'bg-red-950 text-red-300'
+    : active
+      ? 'bg-blue-900 text-blue-300'
+      : 'text-slate-300'
   return (
     <div
       ref={setNodeRef}
       style={style}
       {...attributes}
       {...listeners}
-      onClick={() => onNavigate(path)}
-      className={`group flex items-center gap-1 text-left px-2 py-2 rounded-md text-sm truncate ${
-        active ? 'bg-blue-900 text-blue-300' : 'text-slate-300'
-      } hover:bg-slate-700 ${disabled ? 'cursor-default' : 'cursor-move'} ${
-        isDragging ? 'opacity-70' : ''
-      }`}
+      onClick={() => { if (path) onNavigate(path) }}
+      className={`group flex items-center gap-1 text-left px-2 py-2 rounded-md text-sm truncate ${rowColor} ${
+        isFailed ? 'hover:bg-red-900' : 'hover:bg-slate-700'
+      } ${
+        disabled ? 'cursor-default' : 'cursor-move'
+      } ${isDragging ? 'opacity-70' : ''}`}
     >
-      {isRetranslating || isPending ? (
+      {isFailed ? (
+        <span className="text-red-400 font-bold shrink-0" title="Translation failed">✕</span>
+      ) : isRetranslating || isPending ? (
         <span className="inline-block w-3 h-3 border-2 border-slate-500 border-t-slate-300 rounded-full animate-spin shrink-0" />
       ) : (
         <span className="text-slate-500 group-hover:text-slate-300 shrink-0" title="Drag to reorder">☰</span>
@@ -327,8 +344,9 @@ function ChapterList({ work }: { work: string }) {
     <div className="px-3 py-2 text-sm text-slate-500">No chapters yet.</div>
   )
   return (
-    <div className="flex flex-col gap-1 mt-2">
-      <div className="px-3 text-xs uppercase text-slate-500">Chapters</div>
+    <div className="flex flex-col gap-1 mt-2 flex-1 min-h-0">
+      <div className="px-3 text-xs uppercase text-slate-500 shrink-0">Chapters</div>
+      <div className="flex-1 min-h-0 overflow-y-auto">
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
         <SortableContext
           items={chapters.map((e) => e.id)}
@@ -337,8 +355,10 @@ function ChapterList({ work }: { work: string }) {
           {chapters.map((e: ChapterEntry) => {
             const path = e.status === 'pending'
               ? `/work/${encodeURIComponent(work)}/translating/${encodeURIComponent(e.id)}`
-              : `/work/${encodeURIComponent(work)}/chapters/${encodeURIComponent(e.filename!)}`
-            const active = location.pathname === path
+              : e.filename
+                ? chapterViewPath(work, e.filename)
+                : ''
+            const active = !!path && location.pathname === path
             return (
               <SortableChapterRow
                 key={e.id}
@@ -351,6 +371,7 @@ function ChapterList({ work }: { work: string }) {
           })}
         </SortableContext>
       </DndContext>
+      </div>
     </div>
   )
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# stop.sh - Stop the background backend + frontend processes.
+# stop.sh - Stop the background backend, translator frontend, and reader.
 #
 set -euo pipefail
 
@@ -40,7 +40,11 @@ kill_pattern() {
 
 stop_pid_file ".backend.pid" "backend"
 stop_pid_file ".frontend.pid" "frontend"
+stop_pid_file ".reader.pid" "reader"
+stop_pid_file ".avahi.pid" "avahi"
 kill_pattern "uvicorn backend.main:app" "backend"
 kill_pattern "vite.*--port ${FRONTEND_PORT:-5173}" "frontend"
+kill_pattern "vite.reader.config" "reader"
+kill_pattern "avahi-publish -a -R ${LAN_NAME:-read.local}" "avahi"
 
 echo "Stopped."

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Save, Check, Clock } from 'lucide-react'
-import { apiGetChapter, apiUpdateChapter, apiDeleteChapter, apiRetranslateChapter } from '../services/api'
+import { apiGetChapter, apiUpdateChapter, apiDeleteChapter, apiRetranslateChapter, chapterFilename, chapterViewPath } from '../services/api'
 import { Button } from '../components/ui/Button'
 import { ConfirmDialog } from '../components/modals/ConfirmDialog'
 import { useAppStore } from '../stores/appStore'
@@ -40,7 +40,8 @@ function AutoSaveIndicator({ state, lastSaveTime }: { state: SaveState; lastSave
 }
 
 export function ViewerPage() {
-  const { work, chapter } = useParams<{ work: string; chapter: string }>()
+  const { work, chapter: chapterSlug } = useParams<{ work: string; chapter: string }>()
+  const chapter = chapterSlug ? chapterFilename(chapterSlug) : undefined
   const navigate = useNavigate()
   const qc = useQueryClient()
   const activeJobs = useAppStore((s) => s.activeJobs)
@@ -67,6 +68,8 @@ export function ViewerPage() {
   // Latest values for the async save closure to read.
   const stateRef = useRef({ original, translated, newTitle })
   stateRef.current = { original, translated, newTitle }
+  // Mirror retranslating for the unmount effect (which has [] deps).
+  const retranslatingRef = useRef(false)
 
   useEffect(() => {
     if (data) {
@@ -87,6 +90,7 @@ export function ViewerPage() {
   const retranslating = work && chapter
     ? Object.values(activeJobs).some((j) => j.work === work && j.targetChapter === chapter)
     : false
+  retranslatingRef.current = retranslating
 
   const performSave = useCallback(
     async (force = false) => {
@@ -108,7 +112,7 @@ export function ViewerPage() {
         setSaveState('saved')
         qc.invalidateQueries({ queryKey: ['chapters', work] })
         if (res.filename !== chapter) {
-          navigate(`/work/${encodeURIComponent(work)}/chapters/${encodeURIComponent(res.filename)}`, { replace: true })
+          navigate(chapterViewPath(work, res.filename), { replace: true })
         }
       } catch {
         setSaveState('idle')
@@ -117,9 +121,12 @@ export function ViewerPage() {
     [work, chapter, navigate, qc],
   )
 
-  // Debounced auto-save on any edit (skip while retranslating).
+  // Debounced auto-save on any edit. Skip while retranslating (the backend
+  // job overwrites the file on done; auto-save must not race with it) and
+  // never save when original is empty (would clobber real content with garbage).
   useEffect(() => {
     if (retranslating) return
+    if (!original.trim() && !translated.trim()) return
     if (timerRef.current) clearTimeout(timerRef.current)
     timerRef.current = setTimeout(() => { performSave() }, 1500)
     return () => {
@@ -127,11 +134,13 @@ export function ViewerPage() {
     }
   }, [original, translated, newTitle, retranslating, performSave])
 
-  // Final save on unmount if dirty.
+  // Final save on unmount if dirty. Skip if retranslating (backend owns the
+  // file) or if content is empty (would write garbage over real content).
   useEffect(() => {
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current)
       const { original: o, translated: t, newTitle: nt } = stateRef.current
+      if ((!o.trim() && !t.trim()) || retranslatingRef.current) return
       if (
         o !== lastSavedRef.current.original ||
         t !== lastSavedRef.current.translated ||

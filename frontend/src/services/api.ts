@@ -12,7 +12,7 @@ export type Chapter = {
 export type ChapterEntry = {
   id: string
   filename: string | null
-  status: 'pending' | 'done' | 'retranslating'
+  status: 'pending' | 'done' | 'retranslating' | 'failed'
 }
 
 export type Terms = Record<string, string>
@@ -63,5 +63,19 @@ export const apiSetChapterOrder = (workId: string, ids: string[]) =>
 
 export const apiRetranslateChapter = (workId: string, chapter: string) =>
   api.post<{ job_id: string }>(`/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(chapter)}/retranslate`).then(r => r.data.job_id)
+
+/** Viewer URL slug: filename without a trailing .json (Vite 404s on reload if the path looks like a file). */
+export function chapterSlug(filename: string): string {
+  return filename.replace(/\.json$/i, '')
+}
+
+/** Turn a viewer slug (or a filename) back into the on-disk chapter filename. */
+export function chapterFilename(slug: string): string {
+  return slug.toLowerCase().endsWith('.json') ? slug : `${slug}.json`
+}
+
+export function chapterViewPath(workId: string, filename: string): string {
+  return `/work/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(chapterSlug(filename))}`
+}
 
 export default api

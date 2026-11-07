@@ -131,40 +131,6 @@ def _work_dir_writable(work_id: str) -> Path:
 # Chapters
 # ---------------------------------------------------------------------------
 
-def get_chapters(work_name: str) -> list[str]:
-    """Ordered list of chapter filenames (with .json), for legacy callers.
-
-    Order: chapters listed in chapter_order.json (in that order) first, then
-    any chapter files not in the order file, sorted by mtime desc (newest
-    first) so freshly finished translations surface at the top until the user
-    drags them."""
-    work_dir = _work_dir_or_404(work_name)
-    all_files = {
-        f.name for f in work_dir.iterdir()
-        if f.is_file() and f.suffix == ".json"
-        and f.name != "macro.json"
-        and f.name != "chapter_order.json"
-    }
-    order_path = work_dir / "chapter_order.json"
-    ordered: list[str] = []
-    if order_path.exists():
-        try:
-            saved = json.loads(order_path.read_text(encoding="utf-8"))
-            if isinstance(saved, list):
-                for name in saved:
-                    if name in all_files and name not in ordered:
-                        ordered.append(name)
-        except (json.JSONDecodeError, ValueError):
-            pass
-    remaining = all_files - set(ordered)
-    # Sort remaining by mtime desc (newest first).
-    remaining_sorted = sorted(
-        remaining,
-        key=lambda n: (work_dir / n).stat().st_mtime,
-        reverse=True,
-    )
-    return remaining_sorted + ordered
-
 
 # ---------------------------------------------------------------------------
 # Chapter order list (new entry-based format)
@@ -172,7 +138,7 @@ def get_chapters(work_name: str) -> list[str]:
 #
 # chapter_order.json is now a list of entries:
 #   [{ "id": "<microsecond-timestamp>", "filename": "ep1.json" | null,
-#      "status": "pending" | "done" | "retranslating" }, ...]
+#      "status": "pending" | "done" | "retranslating" | "failed" }, ...]
 #
 # The list is maintained newest-first (the id is a microsecond timestamp, so
 # index 0 is the newest). `id` is both the unique identifier and the sort key.
@@ -270,29 +236,117 @@ def migrate_order(work_name: str) -> None:
     _write_order(work_name, entries)
 
 
+def _translated_empty(work_dir: Path, filename: str | None) -> bool:
+    """True when a chapter has no translated text (missing file, unreadable
+    file, or an empty/whitespace `translated` field)."""
+    if not filename:
+        return True
+    path = work_dir / filename
+    if not path.is_file():
+        return True
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError):
+        return True
+    if not isinstance(data, dict):
+        return True
+    return not str(data.get("translated") or "").strip()
+
+
 def get_chapter_list(work_name: str) -> list[dict]:
     """Return the unified entry list (the single source of truth for the
-    sidebar). Migrates legacy format on first call."""
+    sidebar). Migrates legacy format on first call.
+
+    A finished chapter whose translated text is empty is reported as
+    `failed` so the sidebar can flag API/parse failures. Pending and
+    retranslating rows are left alone."""
     migrate_order(work_name)
-    return _read_order(work_name)
+    entries = _read_order(work_name)
+    work_dir = _work_dir_or_404(work_name)
+    for e in entries:
+        if e["status"] in ("pending", "retranslating"):
+            continue
+        # Empty translation (no file, or a blank `translated` field) is the
+        # failure signal. A previously failed row whose translation was later
+        # filled in goes back to done.
+        e["status"] = "failed" if _translated_empty(work_dir, e.get("filename")) else "done"
+    return entries
 
 
-def add_order_entry(work_name: str, entry_id: str) -> None:
+def add_order_entry(
+    work_name: str, entry_id: str, filename: str | None = None
+) -> None:
     """Insert a pending entry at index 0 (newest first)."""
     entries = _read_order(work_name)
     if any(e["id"] == entry_id for e in entries):
         return
-    entries.insert(0, {"id": entry_id, "filename": None, "status": "pending"})
+    entries.insert(0, {"id": entry_id, "filename": filename, "status": "pending"})
     _write_order(work_name, entries)
 
 
-def complete_order_entry(work_name: str, entry_id: str, filename: str) -> None:
-    """Mark an entry done and fill in its filename (position unchanged)."""
+def _timestamp_stem(entry_id: str) -> str:
+    """YYYY-MM-DD_HH-MM-SS from a microsecond entry id, or now if it isn't one."""
+    if len(entry_id) >= 14 and entry_id[:14].isdigit():
+        s = entry_id
+        return f"{s[0:4]}-{s[4:6]}-{s[6:8]}_{s[8:10]}-{s[10:12]}-{s[12:14]}"
+    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def reserve_pending_chapter(work_name: str, entry_id: str, original_text: str) -> str:
+    """Create the chapter file under a timestamp name and a pending order
+    entry pointing at it. Returns the filename. The caller renames the file
+    to the translation title once the job succeeds."""
+    work_dir = _work_dir_writable(work_name)
+    base = _timestamp_stem(entry_id)
+    filename = f"{base}.json"
+    i = 2
+    while (work_dir / filename).exists():
+        filename = f"{base}_{i}.json"
+        i += 1
+    (work_dir / filename).write_text(
+        json.dumps(
+            {"original": original_text, "translated": ""},
+            ensure_ascii=False,
+            indent=4,
+        ),
+        encoding="utf-8",
+    )
+    add_order_entry(work_name, entry_id, filename)
+    return filename
+
+
+def rename_chapter_to_title(work_name: str, filename: str, translated_text: str) -> str:
+    """Rename a finished chapter file to the first non-empty line of its
+    translation (30 chars). Returns the new filename, or the old one if there
+    is nothing to name it with. Updates chapter_order.json in place."""
+    sanitized = _sanitize_filename(title_from_translation(translated_text))
+    if not sanitized:
+        return filename
+    work_dir = _work_dir_or_404(work_name)
+    new_name = f"{sanitized}.json"
+    if new_name == filename:
+        return filename
+    if (work_dir / new_name).exists():
+        base = sanitized
+        i = 2
+        while (work_dir / f"{base}_{i}.json").exists():
+            i += 1
+        new_name = f"{base}_{i}.json"
+    (work_dir / filename).rename(work_dir / new_name)
+    rename_in_order(work_name, filename, new_name)
+    return new_name
+
+
+def complete_order_entry(
+    work_name: str, entry_id: str, filename: str, status: str = "done"
+) -> None:
+    """Fill in an entry's filename and set its status (position unchanged).
+    `status` is "done" on success and "failed" when the translation is empty."""
     entries = _read_order(work_name)
     for e in entries:
         if e["id"] == entry_id:
             e["filename"] = filename
-            e["status"] = "done"
+            e["status"] = status
             break
     _write_order(work_name, entries)
 
@@ -302,6 +356,14 @@ def cancel_order_entry(work_name: str, entry_id: str) -> None:
     entries = _read_order(work_name)
     entries = [e for e in entries if e["id"] != entry_id]
     _write_order(work_name, entries)
+
+
+def add_finished_chapter(work_name: str, filename: str) -> None:
+    """Insert a done entry at the top for a chapter saved outside the job
+    flow (e.g. the Stop button saving a partial translation)."""
+    entry_id = _mtime_id(_work_dir_or_404(work_name) / filename)
+    add_order_entry(work_name, entry_id, filename)
+    complete_order_entry(work_name, entry_id, filename)
 
 
 def set_order_entry_status(work_name: str, entry_id: str, status: str) -> None:
@@ -366,36 +428,6 @@ def save_chapter_order_by_ids(work_name: str, ids: list[str]) -> None:
     _write_order(work_name, out)
 
 
-def save_chapter_order(work_name: str, order_list: list[str]) -> None:
-    """Persist an explicit chapter order. Drops any filenames that don't
-    exist on disk; appends any existing chapters the caller omitted (so the
-    order file never hides chapters)."""
-    work_dir = _work_dir_or_404(work_name)
-    all_files = {
-        f.name for f in work_dir.iterdir()
-        if f.is_file() and f.suffix == ".json"
-        and f.name != "macro.json"
-        and f.name != "chapter_order.json"
-    }
-    seen: set[str] = set()
-    out: list[str] = []
-    for name in order_list:
-        if name in all_files and name not in seen:
-            seen.add(name)
-            out.append(name)
-    # Append any chapters not mentioned so they remain visible (newest first).
-    leftover = sorted(
-        all_files - seen,
-        key=lambda n: (work_dir / n).stat().st_mtime,
-        reverse=True,
-    )
-    out.extend(leftover)
-    (work_dir / "chapter_order.json").write_text(
-        json.dumps(out, ensure_ascii=False, indent=4),
-        encoding="utf-8",
-    )
-
-
 def get_chapter(work_name: str, chapter: str) -> dict:
     """Return {original, translated} for a chapter file."""
     path = _work_dir_or_404(work_name) / chapter
@@ -431,6 +463,16 @@ def _sanitize_filename(name: str) -> str:
     return name
 
 
+def title_from_translation(translated_text: str, limit: int = 30) -> str:
+    """First non-empty line of the translation, trimmed to `limit` characters.
+    Empty or whitespace-only lines are skipped. Returns "" if there is none."""
+    for line in (translated_text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line[:limit].strip()
+    return ""
+
+
 def save_chapter(
     work_name: str,
     original_text: str,
@@ -438,7 +480,9 @@ def save_chapter(
     title: str | None = None,
 ) -> str:
     """Save a new chapter. If `title` is given it becomes the filename
-    (sanitized), otherwise a timestamp is used. Returns the filename."""
+    (sanitized), otherwise a timestamp is used. Returns the filename.
+    Translation jobs do not use this for the final title: they reserve a
+    timestamp file first and rename it after the translation is in."""
     work_dir = _work_dir_writable(work_name)
     work_dir.mkdir(parents=True, exist_ok=True)
 

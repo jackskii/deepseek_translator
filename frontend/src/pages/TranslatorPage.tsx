@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { Button } from '../components/ui/Button'
 import { apiStartTranslation } from '../services/api'
 import { useAppStore } from '../stores/appStore'
@@ -7,6 +8,7 @@ import { useWorkName } from '../hooks/useWorkName'
 
 export function TranslatorPage() {
   const { work } = useParams<{ work: string }>()
+  const qc = useQueryClient()
   const addActiveJob = useAppStore((s) => s.addActiveJob)
   const activeJobs = useAppStore((s) => s.activeJobs)
   const [inputText, setInputText] = useState('')
@@ -24,6 +26,7 @@ export function TranslatorPage() {
     try {
       const jobId = await apiStartTranslation(work, inputText)
       addActiveJob(jobId, work, now, inputText)
+      qc.invalidateQueries({ queryKey: ['chapters', work] })
       setInputText('')  // clear immediately, ready for the next chapter
     } catch (e) {
       setMessage(`Failed to start: ${(e as Error).message}`)

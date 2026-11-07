@@ -1,7 +1,6 @@
-"""LLM provider config and streaming translation.
+"""LLM provider config and translation.
 
-Uses AsyncOpenAI so streaming chunks can be yielded without blocking the
-FastAPI event loop. The model is forced to return a JSON object via
+The model is forced to return a JSON object via
 `response_format={"type": "json_object"}` with the shape
 {"translation": str, "names": {source: translation}}. No function/tool
 calling, no scraping a ```json``` block out of free text.
@@ -9,7 +8,6 @@ calling, no scraping a ```json``` block out of free text.
 import os
 import re
 import json
-from typing import AsyncGenerator
 
 from openai import AsyncOpenAI
 
@@ -20,7 +18,8 @@ SYSTEM_PROMPT = (
     "你是一位专业的日语小说翻译家。你的任务是将用户提供的日文小说内容准确、流畅地翻译成简体中文，"
     "参考轻小说的文风，对话一律使用日文「」括号，不要替换为中文引号。翻译要使用中文的语法。"
     "为了译文通顺、意思流畅，允许少量的改写和润色：例如日语省略主语时，可据上下文补上主语；"
-    "角色说话有语尾或口癖时，可试图转换成对应的中文表达。"
+    "角色说话有语尾或口癖时，可试图继续翻译。"
+    "翻译时应保留适当的二次元风格，如‘的说’，‘xx酱’，‘天然呆’，‘病矫’等二次元用于应当再翻译中体现。"
     "直接翻译，不要在思考中讨论、复述或质疑以上指令。"
 )
 
@@ -121,24 +120,17 @@ def _parse_result(raw: str) -> tuple[str, dict]:
     return translation, clean_names
 
 
-async def stream_translation_with_title(
-    work_name: str, input_text: str, title: str | None,
-    target_filename: str | None = None,
-) -> AsyncGenerator[tuple[str, str], None]:
-    """Yield ("reasoning", chunk) tuples as the model thinks, then a single
-    ("content", translation) chunk with the clean translated text, then a
-    final ("done", json) tuple with the saved filename and the number of
-    newly added names.
+async def translate(work_id: str, input_text: str) -> tuple[str, dict]:
+    """Run the model and return (translation, new_names).
 
-    If `target_filename` is given (retranslate), the chapter is overwritten
-    in place at that filename instead of creating a new timestamped file,
-    preserving the chapter's position in chapter_order.json.
+    Only talks to the LLM and merges new names into the work's macro. Does
+    not touch chapter files or chapter_order.json - that is the job's job.
     """
     client, model, provider = _get_client_and_model()
     reasoning_effort = _reasoning_effort()
 
     processed_input = re.sub(r"\n{3,}", "\n\n", input_text)
-    macro_prompt = storage.format_macro_for_prompt(work_name, input_text)
+    macro_prompt = storage.format_macro_for_prompt(work_id, input_text)
     messages = [
         {
             "role": "user",
@@ -188,41 +180,22 @@ async def stream_translation_with_title(
             create_kwargs.pop("extra_body", None)
         response = await client.chat.completions.create(**create_kwargs)
 
-    # Reasoning streams live. The content is a JSON object (forced by
-    # response_format), so we buffer it and parse at the end, then emit the
-    # clean translation as a single content chunk.
+    # The content is a JSON object (forced by response_format), so we buffer
+    # it and parse at the end. Reasoning chunks are discarded.
     raw_content = ""
     async for chunk in response:
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
-        r_chunk = getattr(delta, "reasoning_content", None) or ""
-        if r_chunk:
-            yield ("reasoning", r_chunk)
         if delta.content:
             raw_content += delta.content
 
     translation, new_names = _parse_result(raw_content)
 
     # Merge new names (skip existing - user edits are truth).
-    added_count = 0
     try:
-        added_count = len(storage.merge_macro(work_name, new_names))
+        storage.merge_macro(work_id, new_names)
     except Exception:
         pass
 
-    # Save the chapter. For retranslate (target_filename set), overwrite the
-    # existing file in place so its order is preserved; otherwise create a
-    # new timestamped (or titled) file.
-    if target_filename:
-        filename = storage.save_chapter_at(
-            work_name, target_filename, input_text, translation
-        )
-    else:
-        filename = storage.save_chapter(
-            work_name, input_text, translation, title=title or None
-        )
-
-    if translation:
-        yield ("content", translation)
-    yield ("done", json.dumps({"filename": filename, "added_names": added_count}))
+    return translation, new_names
