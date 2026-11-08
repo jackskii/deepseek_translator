@@ -33,6 +33,7 @@ import {
   apiStartTranslation,
   apiScrape,
   apiErrorMessage,
+  apiSaveAutoProgress,
   chapterViewPath,
   type ChapterEntry,
 } from './services/api'
@@ -99,8 +100,15 @@ export default function App() {
       return !cancelled && run?.status === 'running'
     }
 
+    const MAX_RUNNING = 10
+    const runningCount = () => Object.keys(useAppStore.getState().activeJobs).length
+
     ;(async () => {
       while (stillRunning()) {
+        while (stillRunning() && runningCount() >= MAX_RUNNING) {
+          await sleep(500)
+        }
+        if (!stillRunning()) break
         const run = useAppStore.getState().autoRun
         if (!run || run.status !== 'running') break
         const url = run.nextUrl
@@ -124,14 +132,25 @@ export default function App() {
           const started = (useAppStore.getState().autoRun?.started ?? 0) + 1
           const limit = useAppStore.getState().autoRun?.limit ?? null
           const hitLimit = limit != null && started >= limit
+          const nextUrl = scraped.next_url ?? ''
           useAppStore.getState().patchAutoRun({
             started,
             lastUrl: url,
-            nextUrl: scraped.next_url ?? '',
+            nextUrl,
             ...(hitLimit
               ? { status: 'done' as const, message: `已结束（${started} 章）` }
               : {}),
           })
+          try {
+            await apiSaveAutoProgress(run.work, {
+              source: run.source,
+              lastUrl: url,
+              nextUrl,
+            })
+            qc.invalidateQueries({ queryKey: ['auto-progress', run.work] })
+          } catch {
+            // progress file is best-effort; the job already started
+          }
           if (hitLimit || !scraped.next_url) {
             if (!hitLimit) {
               useAppStore.getState().patchAutoRun({

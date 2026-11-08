@@ -47,8 +47,9 @@ class LLMConfigError(RuntimeError):
 # providers listed in `ignore`. Mirrors AI_writer's setting; "wafer" added per
 # user request. OpenRouter accepts these as a `provider` object in extra_body.
 OPENROUTER_PROVIDER_ROUTING = {
+    "sort": "price",
     "quantizations": ["fp16", "fp8"],
-    "ignore": ["alibaba", "baidu", "google-ai-studio", "wafer", "wafer/us", "Cloudflare"],
+    "ignore": ["alibaba", "baidu", "google-ai-studio"],
 }
 
 

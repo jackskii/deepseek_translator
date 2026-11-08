@@ -24,6 +24,7 @@ app.add_middleware(
 app.include_router(works.router)
 app.include_router(chapters.router)
 app.include_router(terms.router)
+app.include_router(terms.universal_router)
 app.include_router(translate.router)
 app.include_router(scrape.router)
 

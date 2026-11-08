@@ -1,50 +1,59 @@
 #!/usr/bin/env bash
 #
-# stop.sh - Stop the background backend, translator frontend, and reader.
+# stop.sh - Free the app ports and stop avahi. Shared by start.sh.
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-stop_pid_file() {
-    local pid_file="$1" label="$2"
-    if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
-        local pid
-        pid="$(cat "$pid_file")"
-        echo "Stopping $label (PID $pid)..."
-        kill "$pid" 2>/dev/null || true
-        for _ in $(seq 1 20); do
-            kill -0 "$pid" 2>/dev/null || break
-            sleep 0.5
-        done
-        kill -9 "$pid" 2>/dev/null || true
+BACKEND_PORT="${BACKEND_PORT:-8000}"
+FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+READER_PORT="${READER_PORT:-5174}"
+LAN_NAME="${LAN_NAME:-read.local}"
+
+listen_pids() {
+    local port="$1"
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
+        return
     fi
-    rm -f "$pid_file"
+    ss -lptn "sport = :$port" 2>/dev/null \
+        | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
+        | sort -u
 }
 
-# Also reclaim stale processes from previous runs that the PID file no longer
-# tracks. Match by command line (not port) so we don't kill unrelated apps
-# that happen to share a port, and still work if the port was changed.
-kill_pattern() {
-    local pattern="$1" label="$2" pids
-    pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
+free_port() {
+    local port="$1" label="$2"
+    local pids
+    pids="$(listen_pids "$port")"
+    if [[ -z "$pids" ]]; then
+        return 0
+    fi
+    echo "Stopping $label on :$port"
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+    for _ in $(seq 1 25); do
+        [[ -z "$(listen_pids "$port")" ]] && return 0
+        sleep 0.2
+    done
+    pids="$(listen_pids "$port")"
     if [[ -n "$pids" ]]; then
         # shellcheck disable=SC2086
-        kill $pids 2>/dev/null || true
-        sleep 1
-        # shellcheck disable=SC2086
         kill -9 $pids 2>/dev/null || true
+        sleep 0.2
     fi
 }
 
-stop_pid_file ".backend.pid" "backend"
-stop_pid_file ".frontend.pid" "frontend"
-stop_pid_file ".reader.pid" "reader"
-stop_pid_file ".avahi.pid" "avahi"
-kill_pattern "uvicorn backend.main:app" "backend"
-kill_pattern "vite.*--port ${FRONTEND_PORT:-5173}" "frontend"
-kill_pattern "vite.reader.config" "reader"
-kill_pattern "avahi-publish -a -R ${LAN_NAME:-read.local}" "avahi"
+free_port "$BACKEND_PORT" "backend"
+free_port "$FRONTEND_PORT" "translator"
+free_port "$READER_PORT" "reader"
+
+# npm wrappers can outlive the listener; they do not hold the port.
+pkill -f "npm run dev -- --port ${FRONTEND_PORT}" 2>/dev/null || true
+pkill -f "npm run reader -- --port ${READER_PORT}" 2>/dev/null || true
+pkill -f "avahi-publish -a -R ${LAN_NAME}" 2>/dev/null || true
+
+rm -f .backend.pid .frontend.pid .reader.pid .avahi.pid
 
 echo "Stopped."

@@ -22,6 +22,7 @@ BASE_LOG_DIR.mkdir(exist_ok=True)
 # truth for which works exist; URLs use the stable work_id, not the
 # (possibly renameable) directory name.
 MANIFEST_PATH = BASE_LOG_DIR / "works.json"
+UNIVERSAL_MACRO_PATH = BASE_LOG_DIR / "universal_macro.json"
 
 
 def _load_manifest() -> dict[str, str]:
@@ -67,19 +68,27 @@ def _resolve_work_name(work_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 def get_works() -> list[dict]:
-    """List of {id, name} for every work, sorted by name."""
+    """List of {id, name, chapterCount, wordCount, lastTranslated, lastRead, added}."""
     manifest = _load_manifest()
-    return sorted(
-        ({"id": wid, "name": name} for wid, name in manifest.items()),
-        key=lambda x: x["name"],
-    )
+    out: list[dict] = []
+    for wid, name in manifest.items():
+        try:
+            stats = get_work_stats(wid)
+        except FileNotFoundError:
+            stats = _empty_stats()
+        out.append({"id": wid, "name": name, **stats})
+    return out
 
 
 def create_work(work_name: str) -> str:
     """Create a work directory with an empty macro.json and an empty
     chapter_order.json, register it in the manifest, and return its new
-    work_id."""
+    work_id. Raises FileExistsError if the name (or its directory) is
+    already used."""
     work_dir = BASE_LOG_DIR / work_name
+    manifest = _load_manifest()
+    if work_name in manifest.values() or work_dir.is_dir():
+        raise FileExistsError(f"Work '{work_name}' already exists.")
     work_dir.mkdir(parents=True, exist_ok=True)
     macro_file = work_dir / "macro.json"
     if not macro_file.exists():
@@ -93,6 +102,9 @@ def create_work(work_name: str) -> str:
         work_id = uuid.uuid4().hex[:8]
     manifest[work_id] = work_name
     _save_manifest(manifest)
+    stats = _empty_stats()
+    stats["added"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    _write_stats_file(work_id, stats)
     return work_id
 
 
@@ -146,7 +158,7 @@ def _work_dir_writable(work_id: str) -> Path:
 # `filename` field in place (position unchanged). Canceling a job removes its
 # entry. Completing a job fills in `filename` and sets `status="done"`.
 
-_ORDER_IGNORE = {"macro.json", "chapter_order.json"}
+_ORDER_IGNORE = {"macro.json", "chapter_order.json", "auto.json", "stats.json"}
 
 
 def _read_order(work_name: str) -> list[dict]:
@@ -349,6 +361,7 @@ def complete_order_entry(
             e["status"] = status
             break
     _write_order(work_name, entries)
+    refresh_work_stats(work_name)
 
 
 def cancel_order_entry(work_name: str, entry_id: str) -> None:
@@ -382,6 +395,7 @@ def set_status_by_filename(work_name: str, filename: str, status: str) -> None:
             e["status"] = status
             break
     _write_order(work_name, entries)
+    refresh_work_stats(work_name)
 
 
 def get_entry_id_by_filename(work_name: str, filename: str) -> str | None:
@@ -436,6 +450,139 @@ def get_chapter(work_name: str, chapter: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _empty_stats() -> dict:
+    return {
+        "chapterCount": 0,
+        "wordCount": 0,
+        "lastTranslated": "",
+        "lastRead": "",
+        "added": "",
+    }
+
+
+def _added_from_dir(work_id: str) -> str:
+    work_dir = _work_dir_or_404(work_id)
+    return datetime.fromtimestamp(work_dir.stat().st_ctime).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _read_stats_file(work_id: str) -> dict | None:
+    path = _work_dir_or_404(work_id) / "stats.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {
+        "chapterCount": int(data.get("chapterCount") or 0),
+        "wordCount": int(data.get("wordCount") or 0),
+        "lastTranslated": str(data.get("lastTranslated") or ""),
+        "lastRead": str(data.get("lastRead") or ""),
+        "added": str(data.get("added") or ""),
+    }
+
+
+def _write_stats_file(work_id: str, stats: dict) -> None:
+    path = _work_dir_writable(work_id) / "stats.json"
+    path.write_text(
+        json.dumps(stats, ensure_ascii=False, indent=4),
+        encoding="utf-8",
+    )
+
+
+def _compute_stats(work_id: str) -> dict:
+    """Scan readable chapters once. lastRead is left empty for the caller."""
+    work_dir = _work_dir_or_404(work_id)
+    chapter_count = 0
+    word_count = 0
+    last_mtime: float | None = None
+    for e in get_chapter_list(work_id):
+        filename = e.get("filename")
+        if not filename or e.get("status") not in ("done", "retranslating"):
+            continue
+        path = work_dir / filename
+        try:
+            data = get_chapter(work_id, filename)
+        except FileNotFoundError:
+            continue
+        body = str(data.get("translated") or "")
+        if not body.strip():
+            continue
+        chapter_count += 1
+        word_count += sum(1 for c in body if not c.isspace())
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if last_mtime is None or mtime > last_mtime:
+            last_mtime = mtime
+    last_translated = ""
+    if last_mtime is not None:
+        last_translated = datetime.fromtimestamp(last_mtime).strftime("%Y-%m-%dT%H:%M:%S")
+    stats = _empty_stats()
+    stats["chapterCount"] = chapter_count
+    stats["wordCount"] = word_count
+    stats["lastTranslated"] = last_translated
+    return stats
+
+
+def refresh_work_stats(work_id: str) -> dict:
+    prev = _read_stats_file(work_id) or {}
+    stats = _compute_stats(work_id)
+    stats["lastRead"] = str(prev.get("lastRead") or "")
+    stats["added"] = str(prev.get("added") or "") or _added_from_dir(work_id)
+    _write_stats_file(work_id, stats)
+    return stats
+
+
+def get_work_stats(work_id: str) -> dict:
+    existing = _read_stats_file(work_id)
+    if existing is not None:
+        if not existing.get("added"):
+            existing["added"] = _added_from_dir(work_id)
+            _write_stats_file(work_id, existing)
+        return existing
+    return refresh_work_stats(work_id)
+
+
+def touch_last_read(work_id: str) -> dict:
+    stats = get_work_stats(work_id)
+    stats["lastRead"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    _write_stats_file(work_id, stats)
+    return stats
+
+
+def export_chapters(work_id: str) -> tuple[str, list[tuple[str, str]]]:
+    """Readable chapters in story order (oldest first): (work_name, [(title, body)]).
+
+    Same set as the reader: done / retranslating rows that have a filename.
+    """
+    work_name = _resolve_work_name(work_id)
+    chapters: list[tuple[str, str]] = []
+    for e in reversed(get_chapter_list(work_id)):
+        filename = e.get("filename")
+        if not filename or e.get("status") not in ("done", "retranslating"):
+            continue
+        try:
+            data = get_chapter(work_id, filename)
+        except FileNotFoundError:
+            continue
+        title = filename[:-5] if filename.lower().endswith(".json") else filename
+        body = str(data.get("translated") or "")
+        chapters.append((title, body))
+    return work_name, chapters
+
+
+def export_translated_epub(work_id: str) -> tuple[str, bytes]:
+    """EPUB bytes for all readable chapters. Returns (work_name, epub)."""
+    from .epub import build_epub
+
+    work_name, chapters = export_chapters(work_id)
+    return work_name, build_epub(work_name, chapters)
+
+
 def save_chapter_at(
     work_name: str,
     filename: str,
@@ -454,6 +601,7 @@ def save_chapter_at(
         ),
         encoding="utf-8",
     )
+    refresh_work_stats(work_name)
     return filename
 
 
@@ -542,7 +690,9 @@ def update_chapter(
             new_path = work_dir / new_name
             if not new_path.exists():
                 path.rename(new_path)
+                refresh_work_stats(work_name)
                 return new_name
+    refresh_work_stats(work_name)
     return chapter
 
 
@@ -550,6 +700,39 @@ def delete_chapter(work_name: str, chapter: str) -> None:
     path = _work_dir_or_404(work_name) / chapter
     if path.exists():
         path.unlink()
+    refresh_work_stats(work_name)
+
+
+def load_auto_progress(work_name: str) -> dict:
+    path = _work_dir_or_404(work_name) / "auto.json"
+    empty = {"source": "novel18", "lastUrl": "", "nextUrl": ""}
+    if not path.exists():
+        return empty
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError):
+        return empty
+    if not isinstance(data, dict):
+        return empty
+    return {
+        "source": str(data.get("source") or "novel18"),
+        "lastUrl": str(data.get("lastUrl") or ""),
+        "nextUrl": str(data.get("nextUrl") or ""),
+    }
+
+
+def save_auto_progress(work_name: str, source: str, last_url: str, next_url: str) -> dict:
+    data = {
+        "source": (source or "novel18").strip() or "novel18",
+        "lastUrl": (last_url or "").strip(),
+        "nextUrl": (next_url or "").strip(),
+    }
+    work_dir = _work_dir_writable(work_name)
+    (work_dir / "auto.json").write_text(
+        json.dumps(data, ensure_ascii=False, indent=4),
+        encoding="utf-8",
+    )
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -592,13 +775,30 @@ def merge_macro(work_name: str, new_terms: dict) -> list[str]:
     return written
 
 
+def load_universal_macro() -> dict:
+    if not UNIVERSAL_MACRO_PATH.exists():
+        return {}
+    try:
+        data = json.loads(UNIVERSAL_MACRO_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_universal_macro(macro_data: dict) -> None:
+    UNIVERSAL_MACRO_PATH.write_text(
+        json.dumps(macro_data, ensure_ascii=False, indent=4),
+        encoding="utf-8",
+    )
+
+
 def format_macro_for_prompt(work_name: str, input_text: str = "") -> str:
-    macro_data = load_macro(work_name)
-    if not macro_data or not input_text:
+    if not input_text:
         return ""
-    relevant = {
-        o: t for o, t in macro_data.items() if o in input_text
-    }
+    # Universal first, work overlay so a work-specific term wins on the same key.
+    # Both are filtered the same way and emitted as one unlabeled work-term list.
+    merged = {**load_universal_macro(), **load_macro(work_name)}
+    relevant = {o: t for o, t in merged.items() if o in input_text}
     if not relevant:
         return ""
     pairs = [f"{o}:{t}" for o, t in relevant.items()]

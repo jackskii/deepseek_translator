@@ -47,6 +47,14 @@ def get_job(job_id: str) -> Optional[Job]:
     return _jobs.get(job_id)
 
 
+def running_counts_by_work() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for j in _jobs.values():
+        if j.status == "running":
+            counts[j.work_id] = counts.get(j.work_id, 0) + 1
+    return counts
+
+
 def start(work_id: str, input_text: str) -> Job:
     """Reserve a timestamp-named chapter file with a pending order entry,
     then kick off the background translation. Raises if the file cannot be

@@ -2,7 +2,21 @@ import axios from 'axios'
 
 const api = axios.create({ baseURL: '/api' })
 
-export type Work = { id: string; name: string }
+export type Work = {
+  id: string
+  name: string
+  chapterCount: number
+  wordCount: number
+  lastRead: string
+  lastTranslated: string
+  added: string
+  runningCount?: number
+}
+
+export function workDateLabel(iso: string | undefined): string {
+  if (!iso) return '—'
+  return iso.slice(0, 10)
+}
 
 export type Chapter = {
   original: string
@@ -21,6 +35,15 @@ export const apiGetWorks = () => api.get<{ works: Work[] }>('/works').then(r => 
 export const apiCreateWork = (name: string) =>
   api.post<{ id: string; name: string }>('/works', { name }).then(r => r.data)
 export const apiDeleteWork = (workId: string) => api.delete(`/works/${encodeURIComponent(workId)}`)
+export const apiTouchLastRead = (workId: string) =>
+  api.post(`/works/${encodeURIComponent(workId)}/last-read`).then((r) => r.data)
+
+export type AutoProgress = { source: string; lastUrl: string; nextUrl: string }
+
+export const apiGetAutoProgress = (workId: string) =>
+  api.get<AutoProgress>(`/works/${encodeURIComponent(workId)}/auto`).then(r => r.data)
+export const apiSaveAutoProgress = (workId: string, body: AutoProgress) =>
+  api.put<AutoProgress>(`/works/${encodeURIComponent(workId)}/auto`, body).then(r => r.data)
 
 export const apiGetChapters = (workId: string) =>
   api.get<{ chapters: ChapterEntry[] }>(`/works/${encodeURIComponent(workId)}/chapters`).then(r => r.data.chapters)
@@ -41,6 +64,15 @@ export const apiUpdateTerm = (workId: string, original: string, translation: str
   api.put(`/works/${encodeURIComponent(workId)}/terms/${encodeURIComponent(original)}`, { translation, new_original: newOriginal })
 export const apiDeleteTerm = (workId: string, original: string) =>
   api.delete(`/works/${encodeURIComponent(workId)}/terms/${encodeURIComponent(original)}`)
+
+export const apiGetUniversalTerms = () =>
+  api.get<{ terms: Terms }>('/universal-terms').then(r => r.data.terms)
+export const apiAddUniversalTerm = (original: string, translation: string) =>
+  api.post('/universal-terms', { original, translation })
+export const apiUpdateUniversalTerm = (original: string, translation: string, newOriginal?: string) =>
+  api.put(`/universal-terms/${encodeURIComponent(original)}`, { translation, new_original: newOriginal })
+export const apiDeleteUniversalTerm = (original: string) =>
+  api.delete(`/universal-terms/${encodeURIComponent(original)}`)
 
 // --- Async translation jobs ---
 export type JobStatus = {

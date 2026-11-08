@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import { Button } from '../components/ui/Button'
+import { apiGetAutoProgress } from '../services/api'
 import { useAppStore } from '../stores/appStore'
 import { useWorkName } from '../hooks/useWorkName'
 
@@ -10,6 +12,7 @@ export function AutoTranslatePage() {
   const { work } = useParams<{ work: string }>()
   const workName = useWorkName(work)
   const autoRun = useAppStore((s) => s.autoRun)
+  const activeJobs = useAppStore((s) => s.activeJobs)
   const startAutoRun = useAppStore((s) => s.startAutoRun)
   const stopAutoRun = useAppStore((s) => s.stopAutoRun)
 
@@ -18,8 +21,16 @@ export function AutoTranslatePage() {
   const [count, setCount] = useState(1)
   const [all, setAll] = useState(false)
 
+  const { data: saved } = useQuery({
+    queryKey: ['auto-progress', work],
+    queryFn: () => apiGetAutoProgress(work!),
+    enabled: !!work,
+  })
+
   const running = autoRun?.status === 'running'
   const mine = !!(autoRun && work && autoRun.work === work)
+  const lastUrl = (mine && autoRun.lastUrl) || saved?.lastUrl || ''
+  const nextUrl = (mine && autoRun.started > 0 && autoRun.nextUrl) || saved?.nextUrl || ''
 
   const start = () => {
     if (!work || !url.trim() || running) return
@@ -84,37 +95,40 @@ export function AutoTranslatePage() {
         <Button variant="secondary" onClick={stopAutoRun} disabled={!running}>停止</Button>
       </div>
 
-      {mine && autoRun && (
-        <div className="text-sm text-slate-300 space-y-1">
-          {autoRun.status === 'running' && (
-            <p className="flex items-center gap-2">
-              <span className="inline-block w-3 h-3 border-2 border-slate-500 border-t-slate-300 rounded-full animate-spin" />
-              scraping {autoRun.currentUrl}
-            </p>
-          )}
-          <p>
-            started {autoRun.started}
-            {autoRun.limit != null ? ` / ${autoRun.limit}` : ''} jobs
+      <div className="text-sm text-slate-300 space-y-1">
+        {mine && autoRun.status === 'running' && (
+          <p className="flex items-center gap-2">
+            <span className="inline-block w-3 h-3 border-2 border-slate-500 border-t-slate-300 rounded-full animate-spin" />
+            scraping {autoRun.currentUrl}
           </p>
-          {autoRun.message && (
-            <p className={autoRun.status === 'error' ? 'text-red-400' : 'text-slate-400'}>
-              {autoRun.message}
-            </p>
-          )}
-          {autoRun.lastUrl && (
-            <p className="pt-2">
-              <span className="text-slate-400">上次翻译 </span>
-              <span className="font-mono break-all">{autoRun.lastUrl}</span>
-            </p>
-          )}
-          {!running && autoRun.nextUrl && autoRun.started > 0 && (
+        )}
+        {mine && autoRun && (
+          <>
             <p>
-              <span className="text-slate-400">下一章 </span>
-              <span className="font-mono break-all">{autoRun.nextUrl}</span>
+              started {autoRun.started}
+              {autoRun.limit != null ? ` / ${autoRun.limit}` : ''} jobs
+              {autoRun.status === 'running' ? ` · running ${Object.keys(activeJobs).length} / 10` : ''}
             </p>
-          )}
-        </div>
-      )}
+            {autoRun.message && (
+              <p className={autoRun.status === 'error' ? 'text-red-400' : 'text-slate-400'}>
+                {autoRun.message}
+              </p>
+            )}
+          </>
+        )}
+        {lastUrl && (
+          <p className="pt-2">
+            <span className="text-slate-400">上次翻译 </span>
+            <span className="font-mono break-all">{lastUrl}</span>
+          </p>
+        )}
+        {!running && nextUrl && (
+          <p>
+            <span className="text-slate-400">下一章 </span>
+            <span className="font-mono break-all">{nextUrl}</span>
+          </p>
+        )}
+      </div>
     </div>
   )
 }

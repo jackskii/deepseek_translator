@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Save, Check, Clock } from 'lucide-react'
-import { apiGetChapter, apiUpdateChapter, apiDeleteChapter, apiRetranslateChapter, chapterFilename, chapterViewPath } from '../services/api'
+import { apiGetChapter, apiUpdateChapter, apiDeleteChapter, apiRetranslateChapter, apiTouchLastRead, chapterFilename, chapterViewPath } from '../services/api'
 import { Button } from '../components/ui/Button'
 import { ConfirmDialog } from '../components/modals/ConfirmDialog'
 import { useAppStore } from '../stores/appStore'
@@ -85,6 +85,10 @@ export function ViewerPage() {
       setSaveState('idle')
     }
   }, [data, chapter])
+
+  useEffect(() => {
+    if (work && chapter) apiTouchLastRead(work).catch(() => {})
+  }, [work, chapter])
 
   // Is a retranslate job currently overwriting this chapter in place?
   const retranslating = work && chapter

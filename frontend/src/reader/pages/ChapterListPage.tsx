@@ -61,6 +61,16 @@ export function ChapterListPage() {
           ← 作品
         </button>
         <h1 className="flex-1 min-w-0 truncate font-medium">{workName}</h1>
+        {work && list.length > 0 ? (
+          <a
+            href={`/api/works/${encodeURIComponent(work)}/export`}
+            className="shrink-0 px-2 py-2 text-slate-300 active:text-white"
+          >
+            下载
+          </a>
+        ) : (
+          <span className="shrink-0 px-2 py-2 text-slate-600">下载</span>
+        )}
       </header>
 
       <div
@@ -81,11 +91,11 @@ export function ChapterListPage() {
                 <span className="block leading-snug">继续 {bookmark.title}</span>
               </button>
             )}
-            <ul className="flex flex-col gap-1">
+            <ul className="divide-y divide-slate-700 border-y border-slate-700">
               {slice.map((e) => (
                 <li key={e.id}>
                   <button
-                    className="w-full text-left px-3 py-3.5 rounded-md active:bg-slate-800"
+                    className="w-full text-left px-3 py-3.5 active:bg-slate-800"
                     onClick={() => navigate(chapterViewPath(work!, e.filename!))}
                   >
                     <span className="block leading-snug">{chapterTitle(e.filename!)}</span>

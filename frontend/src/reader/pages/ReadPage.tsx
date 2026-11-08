@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import {
   apiGetChapter,
   apiGetChapters,
+  apiTouchLastRead,
   chapterFilename,
   chapterViewPath,
 } from '../../services/api'
@@ -32,7 +33,9 @@ export function ReadPage() {
   }, [filename])
 
   useEffect(() => {
-    if (work && filename) setBookmark(work, filename, chapterTitle(filename))
+    if (!work || !filename) return
+    setBookmark(work, filename, chapterTitle(filename))
+    apiTouchLastRead(work).catch(() => {})
   }, [work, filename])
 
   const list = readableChapters(chapters)
