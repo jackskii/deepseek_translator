@@ -12,45 +12,12 @@ class ChapterUpdate(BaseModel):
     new_title: str | None = None
 
 
-class ChapterCreate(BaseModel):
-    original: str
-    translated: str
-    title: str | None = None
-
-
-@router.post("", status_code=201)
-def create_chapter(work_id: str, body: ChapterCreate):
-    """Save a new chapter (used by the Stop button to save partial translations)."""
-    try:
-        filename = storage.save_chapter(
-            work_id, body.original, body.translated, title=body.title
-        )
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    storage.add_finished_chapter(work_id, filename)
-    return {"filename": filename}
-
-
 @router.get("")
 def list_chapters(work_id: str):
     try:
         return {"chapters": storage.get_chapter_list(work_id)}
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Work '{work_id}' not found.")
-
-
-class ChapterOrder(BaseModel):
-    order: list[str]
-
-
-@router.put("/order")
-def set_chapter_order(work_id: str, body: ChapterOrder):
-    """Persist an explicit order (list of entry ids) from drag-to-reorder."""
-    try:
-        storage.save_chapter_order_by_ids(work_id, body.order)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return {"ok": True}
 
 
 @router.get("/{chapter}")

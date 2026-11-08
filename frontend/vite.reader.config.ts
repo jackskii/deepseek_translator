@@ -32,6 +32,9 @@ function serveReaderHtml() {
 
 export default defineConfig({
   plugins: [react(), serveReaderHtml()],
+  define: {
+    'import.meta.env.VITE_DESKTOP': JSON.stringify('false'),
+  },
   appType: 'spa',
   server: {
     port: 5174,

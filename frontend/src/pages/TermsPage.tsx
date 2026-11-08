@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   apiGetTerms,
@@ -18,14 +18,21 @@ type Tab = 'work' | 'universal'
 
 export function TermsPage() {
   const { work } = useParams<{ work: string }>()
+  const navigate = useNavigate()
   const workName = useWorkName(work)
   const [tab, setTab] = useState<Tab>('work')
 
   if (!work) return null
 
   return (
-    <div>
-      <h2 className="text-xl font-semibold text-slate-100">📚 Macro - {workName}</h2>
+    <div className="h-full overflow-y-auto px-4 py-4">
+      <button
+        className="mb-3 px-2 py-2 text-slate-300 hover:text-white"
+        onClick={() => navigate(`/work/${encodeURIComponent(work)}`)}
+      >
+        ← 目录
+      </button>
+      <h2 className="text-xl font-semibold text-slate-100">名词表 · {workName}</h2>
 
       <div className="flex gap-1 mt-4 mb-4 border-b border-slate-700">
         <button

@@ -1,9 +1,7 @@
 """File-based storage for works, chapters, and term macros.
 
-This is a direct port of the original Streamlit app's
-`utils/file_operations.py` and `utils/macro_utils.py`, keeping the
-exact same on-disk JSON format so existing `works/` data carries over
-unchanged.
+On-disk JSON under works/: works.json, selection.json, and per-work
+chapter_order.json, auto.json, stats, and chapter files.
 """
 import os
 import json
@@ -23,6 +21,7 @@ BASE_LOG_DIR.mkdir(exist_ok=True)
 # (possibly renameable) directory name.
 MANIFEST_PATH = BASE_LOG_DIR / "works.json"
 UNIVERSAL_MACRO_PATH = BASE_LOG_DIR / "universal_macro.json"
+SELECTION_PATH = BASE_LOG_DIR / "selection.json"
 
 
 def _load_manifest() -> dict[str, str]:
@@ -98,27 +97,156 @@ def create_work(work_name: str) -> str:
         order_file.write_text("[]", encoding="utf-8")
     work_id = uuid.uuid4().hex[:8]
     manifest = _load_manifest()
-    while work_id in manifest:
+    taken_ids = set(manifest) | {
+        str(e.get("id") or "")
+        for e in (_load_selection().get("deleted") or [])
+        if isinstance(e, dict)
+    }
+    while work_id in taken_ids:
         work_id = uuid.uuid4().hex[:8]
     manifest[work_id] = work_name
     _save_manifest(manifest)
+    _drop_deleted_name(work_name)
     stats = _empty_stats()
     stats["added"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     _write_stats_file(work_id, stats)
     return work_id
 
 
+def _load_selection() -> dict:
+    empty = {"deleted": []}
+    if not SELECTION_PATH.exists():
+        return empty
+    try:
+        raw = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError):
+        return empty
+    if not isinstance(raw, dict):
+        return empty
+    deleted = raw.get("deleted")
+    if not isinstance(deleted, list):
+        deleted = []
+    return {"deleted": deleted}
+
+
+def _save_selection(data: dict) -> None:
+    SELECTION_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=4),
+        encoding="utf-8",
+    )
+
+
+def list_deleted_works() -> list[dict]:
+    out: list[dict] = []
+    for e in _load_selection().get("deleted") or []:
+        if not isinstance(e, dict) or not e.get("name"):
+            continue
+        out.append(
+            {
+                "id": str(e.get("id") or ""),
+                "name": str(e.get("name") or ""),
+                "status": "deleted",
+                "chapterCount": int(e.get("chapterCount") or 0),
+                "deletedAt": str(e.get("deletedAt") or ""),
+            }
+        )
+    return out
+
+
+def _drop_deleted_name(name: str) -> None:
+    data = _load_selection()
+    deleted = [e for e in (data.get("deleted") or []) if isinstance(e, dict)]
+    kept = [e for e in deleted if str(e.get("name") or "") != name]
+    if len(kept) != len(deleted):
+        data["deleted"] = kept
+        _save_selection(data)
+
+
+def _record_deleted(work_id: str, name: str, chapter_count: int) -> None:
+    data = _load_selection()
+    deleted = [e for e in (data.get("deleted") or []) if isinstance(e, dict)]
+    deleted = [
+        e
+        for e in deleted
+        if str(e.get("id") or "") != work_id and str(e.get("name") or "") != name
+    ]
+    deleted.insert(
+        0,
+        {
+            "id": work_id,
+            "name": name,
+            "status": "deleted",
+            "chapterCount": int(chapter_count),
+            "deletedAt": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        },
+    )
+    data["deleted"] = deleted
+    _save_selection(data)
+
+
+def _drop_deleted_id(work_id: str) -> None:
+    data = _load_selection()
+    deleted = [e for e in (data.get("deleted") or []) if isinstance(e, dict)]
+    kept = [e for e in deleted if str(e.get("id") or "") != work_id]
+    if len(kept) != len(deleted):
+        data["deleted"] = kept
+        _save_selection(data)
+
+
+def get_deleted_work(work_id: str) -> dict:
+    for e in list_deleted_works():
+        if e["id"] == work_id:
+            return e
+    raise FileNotFoundError(f"Deleted work '{work_id}' not found")
+
+
 def delete_work(work_id: str) -> None:
-    """Recursively delete a work directory and remove it from the manifest."""
+    """Soft-delete: keep the directory, drop the manifest row, tombstone in selection.json."""
     manifest = _load_manifest()
     work_name = manifest.get(work_id)
     if work_name is None:
         return
-    work_dir = BASE_LOG_DIR / work_name
-    if work_dir.is_dir():
-        shutil.rmtree(work_dir)
+    try:
+        chapter_count = int(get_work_stats(work_id).get("chapterCount") or 0)
+    except FileNotFoundError:
+        chapter_count = 0
+    _record_deleted(work_id, work_name, chapter_count)
     manifest.pop(work_id, None)
     _save_manifest(manifest)
+
+
+def restore_work(work_id: str) -> dict:
+    entry = get_deleted_work(work_id)
+    name = entry["name"]
+    work_dir = BASE_LOG_DIR / name
+    if not work_dir.is_dir():
+        raise FileNotFoundError(f"Work files for '{name}' are gone")
+    manifest = _load_manifest()
+    if name in manifest.values():
+        raise FileExistsError(f"Work '{name}' already exists.")
+    manifest[work_id] = name
+    _save_manifest(manifest)
+    _drop_deleted_id(work_id)
+    return {"id": work_id, "name": name}
+
+
+def purge_work(work_id: str) -> None:
+    """Hard-delete: remove directory and tombstone."""
+    name = ""
+    try:
+        entry = get_deleted_work(work_id)
+        name = str(entry.get("name") or "")
+    except FileNotFoundError:
+        pass
+    manifest = _load_manifest()
+    if work_id in manifest:
+        name = manifest.pop(work_id)
+        _save_manifest(manifest)
+    if name:
+        work_dir = BASE_LOG_DIR / name
+        if work_dir.is_dir():
+            shutil.rmtree(work_dir)
+    _drop_deleted_id(work_id)
 
 
 def _work_dir_or_404(work_id: str) -> Path:
@@ -457,6 +585,10 @@ def _empty_stats() -> dict:
         "lastTranslated": "",
         "lastRead": "",
         "added": "",
+        "finished": False,
+        "lastDownload": "",
+        "lastDownloadFrom": 0,
+        "lastDownloadTo": 0,
     }
 
 
@@ -481,6 +613,10 @@ def _read_stats_file(work_id: str) -> dict | None:
         "lastTranslated": str(data.get("lastTranslated") or ""),
         "lastRead": str(data.get("lastRead") or ""),
         "added": str(data.get("added") or ""),
+        "finished": bool(data.get("finished")),
+        "lastDownload": str(data.get("lastDownload") or ""),
+        "lastDownloadFrom": int(data.get("lastDownloadFrom") or 0),
+        "lastDownloadTo": int(data.get("lastDownloadTo") or 0),
     }
 
 
@@ -533,6 +669,10 @@ def refresh_work_stats(work_id: str) -> dict:
     stats = _compute_stats(work_id)
     stats["lastRead"] = str(prev.get("lastRead") or "")
     stats["added"] = str(prev.get("added") or "") or _added_from_dir(work_id)
+    stats["finished"] = bool(prev.get("finished"))
+    stats["lastDownload"] = str(prev.get("lastDownload") or "")
+    stats["lastDownloadFrom"] = int(prev.get("lastDownloadFrom") or 0)
+    stats["lastDownloadTo"] = int(prev.get("lastDownloadTo") or 0)
     _write_stats_file(work_id, stats)
     return stats
 
@@ -550,6 +690,22 @@ def get_work_stats(work_id: str) -> dict:
 def touch_last_read(work_id: str) -> dict:
     stats = get_work_stats(work_id)
     stats["lastRead"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    _write_stats_file(work_id, stats)
+    return stats
+
+
+def record_last_download(work_id: str, start: int, end: int) -> dict:
+    stats = get_work_stats(work_id)
+    stats["lastDownload"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    stats["lastDownloadFrom"] = int(start)
+    stats["lastDownloadTo"] = int(end)
+    _write_stats_file(work_id, stats)
+    return stats
+
+
+def set_finished(work_id: str, finished: bool) -> dict:
+    stats = get_work_stats(work_id)
+    stats["finished"] = bool(finished)
     _write_stats_file(work_id, stats)
     return stats
 
@@ -575,12 +731,28 @@ def export_chapters(work_id: str) -> tuple[str, list[tuple[str, str]]]:
     return work_name, chapters
 
 
-def export_translated_epub(work_id: str) -> tuple[str, bytes]:
-    """EPUB bytes for all readable chapters. Returns (work_name, epub)."""
+def export_translated_epub(
+    work_id: str, start: int | None = None, end: int | None = None
+) -> tuple[str, bytes]:
+    """EPUB for a 1-based inclusive chapter range (story order).
+
+    Filename/title is `{start}-{end} {work_name}` even when the range is
+    the full book, so later chapters don't collide with an old file.
+    """
     from .epub import build_epub
 
     work_name, chapters = export_chapters(work_id)
-    return work_name, build_epub(work_name, chapters)
+    n = len(chapters)
+    if n == 0:
+        raise FileNotFoundError("No translated chapters")
+    s = 1 if start is None else int(start)
+    e = n if end is None else int(end)
+    s = max(1, min(s, n))
+    e = max(s, min(e, n))
+    book_title = f"{s}-{e} {work_name}"
+    data = build_epub(book_title, chapters[s - 1 : e])
+    record_last_download(work_id, s, e)
+    return book_title, data
 
 
 def save_chapter_at(
@@ -703,29 +875,62 @@ def delete_chapter(work_name: str, chapter: str) -> None:
     refresh_work_stats(work_name)
 
 
-def load_auto_progress(work_name: str) -> dict:
+def _read_auto_file(work_name: str) -> dict | None:
     path = _work_dir_or_404(work_name) / "auto.json"
-    empty = {"source": "novel18", "lastUrl": "", "nextUrl": ""}
     if not path.exists():
-        return empty
+        return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+_NCODE_URL_RE = re.compile(r"novel18\.syosetu\.com/(n[0-9a-z]+)", re.I)
+
+
+def _work_url_from(*urls: str) -> str:
+    for u in urls:
+        m = _NCODE_URL_RE.search(u or "")
+        if m:
+            return f"https://novel18.syosetu.com/{m.group(1).lower()}/"
+    return ""
+
+
+def load_auto_progress(work_name: str) -> dict:
+    empty = {"source": "novel18", "workUrl": "", "lastUrl": "", "nextUrl": ""}
+    data = _read_auto_file(work_name)
+    if not data:
         return empty
-    if not isinstance(data, dict):
-        return empty
+    last = str(data.get("lastUrl") or "")
+    nxt = str(data.get("nextUrl") or "")
+    work_url = str(data.get("workUrl") or "") or _work_url_from(last, nxt)
     return {
         "source": str(data.get("source") or "novel18"),
-        "lastUrl": str(data.get("lastUrl") or ""),
-        "nextUrl": str(data.get("nextUrl") or ""),
+        "workUrl": work_url,
+        "lastUrl": last,
+        "nextUrl": nxt,
     }
 
 
-def save_auto_progress(work_name: str, source: str, last_url: str, next_url: str) -> dict:
+def save_auto_progress(
+    work_name: str,
+    source: str,
+    last_url: str,
+    next_url: str,
+    work_url: str | None = None,
+) -> dict:
+    prev = _read_auto_file(work_name) or {}
+    prev_source = str(prev.get("source") or "").strip()
+    prev_work = str(prev.get("workUrl") or "").strip()
+    last = (last_url or "").strip()
+    nxt = (next_url or "").strip()
+    incoming_work = (work_url or "").strip()
     data = {
-        "source": (source or "novel18").strip() or "novel18",
-        "lastUrl": (last_url or "").strip(),
-        "nextUrl": (next_url or "").strip(),
+        "source": prev_source or (source or "novel18").strip() or "novel18",
+        "workUrl": prev_work or incoming_work or _work_url_from(last, nxt),
+        "lastUrl": last,
+        "nextUrl": nxt,
     }
     work_dir = _work_dir_writable(work_name)
     (work_dir / "auto.json").write_text(

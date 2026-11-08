@@ -21,6 +21,9 @@ function spaFallbackForChapterJson() {
 
 export default defineConfig({
   plugins: [react(), spaFallbackForChapterJson()],
+  define: {
+    'import.meta.env.VITE_DESKTOP': JSON.stringify('true'),
+  },
   appType: 'spa',
   server: {
     port: 5173,

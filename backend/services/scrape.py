@@ -19,6 +19,10 @@ NOVEL18_RE = re.compile(
     r"^https?://(?:www\.)?novel18\.syosetu\.com/(n[0-9a-z]+)/(\d+)/?$",
     re.I,
 )
+NOVEL18_WORK_RE = re.compile(
+    r"^https?://(?:www\.)?novel18\.syosetu\.com/(n[0-9a-z]+)/?$",
+    re.I,
+)
 
 
 class AgeGateError(Exception):
@@ -68,7 +72,7 @@ class _NarouParser(HTMLParser):
             return
         if self._title_depth:
             self._title_depth += 1
-        elif "p-novel__title" in classes:
+        elif "p-novel__title" in classes and not self.title_parts:
             self._title_depth = 1
         if self._block_depth:
             self._block_depth += 1
@@ -179,6 +183,57 @@ def _normalize_novel18(url: str) -> tuple[str, str, int]:
     return f"https://novel18.syosetu.com/{ncode}/{n}/", ncode, n
 
 
+def normalize_novel18_work(url: str) -> tuple[str, str, str]:
+    """Accept a TOC or chapter URL. Return (work_url, ncode, first_chapter_url)."""
+    raw = url.strip()
+    ch = NOVEL18_RE.match(raw) or NOVEL18_RE.match(raw.rstrip("/") + "/")
+    if ch:
+        ncode = ch.group(1).lower()
+        work_url = f"https://novel18.syosetu.com/{ncode}/"
+        return work_url, ncode, f"{work_url}1/"
+    wk = NOVEL18_WORK_RE.match(raw) or NOVEL18_WORK_RE.match(raw.rstrip("/") + "/")
+    if not wk:
+        raise ValueError(
+            "URL must look like https://novel18.syosetu.com/<ncode>/"
+        )
+    ncode = wk.group(1).lower()
+    work_url = f"https://novel18.syosetu.com/{ncode}/"
+    return work_url, ncode, f"{work_url}1/"
+
+
+def novel18_work_url_from(*urls: str) -> str:
+    for u in urls:
+        if not (u or "").strip():
+            continue
+        try:
+            work_url, _, _ = normalize_novel18_work(u)
+            return work_url
+        except ValueError:
+            continue
+    return ""
+
+
+def scrape_novel18_work(url: str) -> dict:
+    work_url, _ncode, first_chapter_url = normalize_novel18_work(url)
+    status, html, final = _fetch(work_url)
+    title, _body, seen_body = _parse_novel18_html(html) if html else ("", "", False)
+    if _is_confirm_url(final) or _is_age_gate(html, seen_body):
+        status, html, final = _fetch(work_url)
+        title, _body, seen_body = _parse_novel18_html(html) if html else ("", "", False)
+        if _is_confirm_url(final) or _is_age_gate(html, seen_body):
+            raise AgeGateError("novel18 age verification still showing (over18 cookie rejected)")
+    if status == 404:
+        raise ScrapeError(f"work page not found: {work_url}")
+    title = title.strip()
+    if not title:
+        raise ValueError("could not read work title from URL (p-novel__title)")
+    return {
+        "title": title,
+        "work_url": work_url,
+        "first_chapter_url": first_chapter_url,
+    }
+
+
 def scrape_novel18(url: str) -> dict:
     chapter_url, ncode, n = _normalize_novel18(url)
     status, html, final = _fetch(chapter_url)
@@ -204,10 +259,22 @@ SOURCES: dict[str, Callable[[str], dict]] = {
     "novel18": scrape_novel18,
 }
 
+WORK_SOURCES: dict[str, Callable[[str], dict]] = {
+    "novel18": scrape_novel18_work,
+}
+
 
 def scrape(source: str, url: str) -> dict:
     fn = SOURCES.get(source)
     if fn is None:
         known = ", ".join(sorted(SOURCES))
+        raise ValueError(f"unknown source '{source}'. known: {known}")
+    return fn(url)
+
+
+def scrape_work(source: str, url: str) -> dict:
+    fn = WORK_SOURCES.get(source)
+    if fn is None:
+        known = ", ".join(sorted(WORK_SOURCES))
         raise ValueError(f"unknown source '{source}'. known: {known}")
     return fn(url)

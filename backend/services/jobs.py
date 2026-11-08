@@ -55,6 +55,30 @@ def running_counts_by_work() -> dict[str, int]:
     return counts
 
 
+def running_total() -> int:
+    return sum(1 for j in _jobs.values() if j.status == "running")
+
+
+def list_jobs(work_id: str) -> list[dict]:
+    out: list[dict] = []
+    for j in _jobs.values():
+        if j.work_id != work_id:
+            continue
+        out.append(
+            {
+                "id": j.id,
+                "status": j.status,
+                "filename": j.filename,
+                "is_retranslate": j.is_retranslate,
+                "created_at": j.created_at,
+                "input_text": j.input_text,
+                "error": j.error,
+            }
+        )
+    out.sort(key=lambda e: e["id"], reverse=True)
+    return out
+
+
 def start(work_id: str, input_text: str) -> Job:
     """Reserve a timestamp-named chapter file with a pending order entry,
     then kick off the background translation. Raises if the file cannot be
